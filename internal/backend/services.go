@@ -159,7 +159,7 @@ func (b *Backend) registerSecureConnection() {
 func (b *Backend) registerURLs(c *Ctx, urls []string) (*rmc.Writer, uint32) {
 	cid := b.newCID()
 	c.Conn.CID = cid
-	pub := publicURL(c.Conn)
+	pub := tagURL(publicURL(c.Conn), c.Conn.PID, cid)
 	log.Printf("[secure]   %s registered URLs %v; public %s", c.who(), urls, pub)
 	c.Conn.Data["urls"] = urls
 	b.mu.Lock()

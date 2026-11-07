@@ -3,6 +3,7 @@ package backend
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -230,6 +231,19 @@ func TestLoginAndRegister(t *testing.T) {
 	}
 }
 
+// gameProbeList mimics the game's handling of GetParticipantsURLs
+// (0xA29D90): take every URL before the first one whose PID is the
+// caller's own. The game reads past the end of the list, and crashes, if
+// there is no such entry.
+func gameProbeList(urls []string, self uint32) ([]string, error) {
+	for i, u := range urls {
+		if urlParams(u)["pid"] == strconv.FormatUint(uint64(self), 10) {
+			return urls[:i], nil
+		}
+	}
+	return nil, fmt.Errorf("no URL with PID=%d: the game would crash", self)
+}
+
 // Host creates a lobby, invites a guest by name, the guest accepts, gets
 // the host's URLs and asks the server to set up NAT hole punching.
 func TestInviteJoinAndNAT(t *testing.T) {
@@ -293,18 +307,30 @@ func TestInviteJoinAndNAT(t *testing.T) {
 		t.Fatal("AddFriend failed")
 	}
 
-	// Same public IP (127.0.0.1) for both, so LAN URLs come first; the
-	// guest's own URLs are excluded.
+	// The game's own loop must find the guest's entry and probe the host.
+	// Same public IP (127.0.0.1) for both, so the host's LAN URL comes first.
 	w = &rmc.Writer{}
 	w.U32(gid)
-	urls := rmc.NewReader(guest.call(ProtoMatchMaking, 16, w.Bytes()).Body).StringList()
-	if len(urls) < 2 || urls[0] != "prudp:/address=192.168.0.16;port=9103;sid=15" || !strings.HasPrefix(urls[1], "prudp:/address=127.0.0.1;") {
-		t.Fatalf("participant URLs %v", urls)
+	all := rmc.NewReader(guest.call(ProtoMatchMaking, 16, w.Bytes()).Body).StringList()
+	urls, err := gameProbeList(all, guestPID)
+	if err != nil {
+		t.Fatalf("%v: %v", err, all)
+	}
+	hostTag := fmt.Sprintf(";PID=%d;", hostPID)
+	if len(urls) < 2 || !strings.HasPrefix(urls[0], "prudp:/address=192.168.0.16;port=9103;sid=15;PID=") ||
+		!strings.HasPrefix(urls[1], "prudp:/address=127.0.0.1;") {
+		t.Fatalf("probe list %v", urls)
 	}
 	for _, u := range urls {
-		if strings.Contains(u, "192.168.0.18") {
-			t.Fatalf("guest got its own URL: %v", urls)
+		if !strings.Contains(u+";", hostTag) {
+			t.Fatalf("probe list has a non-host URL: %v", urls)
 		}
+	}
+
+	// A player asking before it has joined still finds its own entry.
+	outsider, _ := s.login(t, "Outsider", "pw3", "prudp:/address=10.1.1.1;port=9103;sid=15")
+	if _, err := gameProbeList(rmc.NewReader(outsider.call(ProtoMatchMaking, 16, w.Bytes()).Body).StringList(), s.b.Store.ByName("outsider").PID); err != nil {
+		t.Fatalf("non-participant: %v", err)
 	}
 
 	// Hole punching via the host's public URL: the host must be asked to

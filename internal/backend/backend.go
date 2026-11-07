@@ -151,6 +151,9 @@ func (b *Backend) dispatch(server string, c *prudp.Conn, raw []byte, allowed fun
 	if who == "" {
 		who = c.Addr.String()
 	}
+	// Remembered for the disconnect log, to tell a crashed or cut-off
+	// client (silent, then timeout) from one that left normally.
+	c.Data["last_call"] = fmt.Sprintf("%s.%s at %s", protoName(m.Proto), name, time.Now().UTC().Format("15:04:05"))
 	f := b.methods[m.Proto][m.Method]
 	if f == nil || !allowed(m.Proto, m.Method) {
 		log.Printf("[%s] %s: UNIMPLEMENTED %s.%s (call %d) body=%x", server, who, protoName(m.Proto), name, m.CallID, m.Body)
@@ -331,7 +334,11 @@ func (h *secureHandler) OnDisconnect(c *prudp.Conn) {
 		h.b.dropInvitations(c.PID)
 	}
 	if c.User != "" {
-		log.Printf("[secure] %s (%s) logged out", c.User, c.Addr)
+		last, _ := c.Data["last_call"].(string)
+		if last == "" {
+			last = "none"
+		}
+		log.Printf("[secure] %s (%s) logged out; last request: %s", c.User, c.Addr, last)
 	}
 }
 

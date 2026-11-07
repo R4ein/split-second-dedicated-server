@@ -36,6 +36,29 @@ func publicURL(c *prudp.Conn) string {
 	return fmt.Sprintf("prudp:/address=%s;port=%d;sid=15;type=3", c.Addr.IP, c.Addr.Port)
 }
 
+// tagURL appends the player's identity, as Quazal's own server does when it
+// stores station URLs. The game relies on it: when joining, it walks the
+// participant URL list until it finds an entry whose PID is its own, and
+// reads past the end of the list (crashing) if there is none.
+func tagURL(u string, pid, cid uint32) string {
+	p := urlParams(u)
+	if _, ok := p["pid"]; !ok {
+		u += fmt.Sprintf(";PID=%d", pid)
+	}
+	if _, ok := p["rvcid"]; !ok && cid != 0 {
+		u += fmt.Sprintf(";RVCID=%d", cid)
+	}
+	return u
+}
+
+func tagURLs(urls []string, c *prudp.Conn) []string {
+	out := make([]string, 0, len(urls))
+	for _, u := range urls {
+		out = append(out, tagURL(u, c.PID, c.CID))
+	}
+	return out
+}
+
 func registeredURLs(c *prudp.Conn) []string {
 	u, _ := c.Data["urls"].([]string)
 	return u
@@ -143,7 +166,9 @@ func contains(l []string, s string) bool {
 	return false
 }
 
-// urlsFor returns pid's station URLs as seen by requester.
+// urlsFor returns pid's station URLs as seen by requester, tagged with the
+// owner's PID and RVCID. A player's own entry is its registered URLs (never
+// empty, so the game always finds its own PID).
 func (b *Backend) urlsFor(pid uint32, requester *prudp.Conn) []string {
 	b.mu.Lock()
 	target := b.sessions[pid]
@@ -151,20 +176,37 @@ func (b *Backend) urlsFor(pid uint32, requester *prudp.Conn) []string {
 	if target == nil {
 		return nil
 	}
-	return stationURLs(target, requester)
+	if target == requester {
+		return ownURLs(target)
+	}
+	return tagURLs(stationURLs(target, requester), target)
 }
 
-// sessionForURL finds the logged-in player a station URL points at, by
-// public address or by one of their registered LAN URLs.
+// ownURLs is a player's own entry in lists sent back to it: never empty.
+func ownURLs(c *prudp.Conn) []string {
+	own := registeredURLs(c)
+	if len(own) == 0 {
+		own = []string{publicURL(c)}
+	}
+	return tagURLs(own, c)
+}
+
+// sessionForURL finds the logged-in player a station URL points at: by its
+// PID tag, by public address, or by one of their registered LAN URLs.
 func (b *Backend) sessionForURL(u string, requester *prudp.Conn) *prudp.Conn {
 	p := urlParams(u)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if pid, err := strconv.ParseUint(p["pid"], 10, 32); err == nil {
+		if s := b.sessions[uint32(pid)]; s != nil {
+			return s
+		}
+	}
 	ip := net.ParseIP(p["address"])
 	port, _ := strconv.Atoi(p["port"])
 	if ip == nil {
 		return nil
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	for _, s := range b.sessions { // exact NAT mapping
 		if s.Addr.IP.Equal(ip) && s.Addr.Port == port {
 			return s

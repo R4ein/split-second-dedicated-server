@@ -446,7 +446,7 @@ func (s *Server) retransmitLoop() {
 				s.udp.WriteToUDP(p.raw, c.Addr)
 			}
 			if now.Sub(c.lastSeen) > 60*time.Second {
-				c.close("timeout")
+				c.close("timeout, last packet at " + c.lastSeen.UTC().Format("15:04:05"))
 			}
 		}
 		s.mu.Unlock()

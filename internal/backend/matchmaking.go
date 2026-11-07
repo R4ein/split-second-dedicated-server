@@ -244,26 +244,34 @@ func (b *Backend) registerMatchMaking() {
 		b.mu.Unlock()
 		return w, 0
 	})
-	// URLs of everyone else in the gathering, host first, so a joining
-	// player connects to the session host rather than to itself.
+	// URLs of all participants in join order (host first), each tagged with
+	// PID, including the caller's own. The game (0xA29D90) walks the list
+	// until it finds its own PID and probes every station before it; it
+	// reads past the end and crashes if its own entry is missing.
 	reg(16, "GetParticipantsURLs", func(c *Ctx) (*rmc.Writer, uint32) {
 		id := c.R.U32()
 		g := b.gatheringByID(id)
-		var urls []string
+		parts := []uint32{}
 		if g != nil {
 			b.mu.Lock()
-			parts := []uint32{g.Owner}
+			parts = append(parts, g.Owner)
 			for _, p := range g.Participants {
 				if p != g.Owner {
 					parts = append(parts, p)
 				}
 			}
 			b.mu.Unlock()
-			for _, p := range parts {
-				if p != c.Conn.PID {
-					urls = append(urls, b.urlsFor(p, c.Conn)...)
-				}
+		}
+		if !containsPID(parts, c.Conn.PID) {
+			parts = append(parts, c.Conn.PID)
+		}
+		var urls []string
+		for _, p := range parts {
+			if p == c.Conn.PID {
+				urls = append(urls, ownURLs(c.Conn)...)
+				continue
 			}
+			urls = append(urls, b.urlsFor(p, c.Conn)...)
 		}
 		log.Printf("[secure]   %s asked URLs of gathering %d: %v", c.who(), id, urls)
 		w := &rmc.Writer{}

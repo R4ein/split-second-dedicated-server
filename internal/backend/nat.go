@@ -26,7 +26,7 @@ func (b *Backend) registerNATTraversal() {
 
 	reg(1, "RequestProbeInitiation", func(c *Ctx) (*rmc.Writer, uint32) {
 		targets := c.R.StringList()
-		b.relayProbes(c, targets, publicURL(c.Conn))
+		b.relayProbes(c, targets, tagURL(publicURL(c.Conn), c.Conn.PID, c.Conn.CID))
 		return nil, 0
 	})
 	reg(3, "RequestProbeInitiationExt", func(c *Ctx) (*rmc.Writer, uint32) {

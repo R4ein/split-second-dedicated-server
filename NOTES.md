@@ -116,6 +116,13 @@ public IP + game port; LAN URLs go first only for players behind the same public
   `XLSPID`, `RVCID`.
 - Accepting an invitation does not call `Participate`; `AcceptInvitation` must add the
   player to the gathering.
+- **`GetParticipantsURLs` result handling (`0xA29D90`, after the calls at `0xA29C92` join /
+  `0xA2925B` accept-invite):** the game walks the returned list and stops at the first URL
+  whose `PID` parameter equals its own PID (`[[MatchMakingClient+0xC]+8]`), taking every URL
+  before it as stations to probe. It dereferences before checking for the end, so a list
+  without the caller's own `PID` makes it run off the end → CRT invalid-parameter abort
+  (`0xC000000D`, WER fault offset `0x358615`). The server must tag URLs with `PID` (and
+  `RVCID`) and return all participants in join order, host first, including the caller.
 - Players on a VPN appear with the VPN exit address; two players on the same exit share one
   public IP and cannot reach each other. A shared virtual LAN (Radmin/ZeroTier/Tailscale)
   works because the game registers every adapter's address.
