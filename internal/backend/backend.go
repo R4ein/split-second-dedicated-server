@@ -77,12 +77,17 @@ type Backend struct {
 
 	methods map[uint16]map[uint32]Method
 	names   map[uint16]map[uint32]string
+	quiet   map[uint32]bool // methods the game polls; logged only with -v
+
+	nextInvite  uint64
+	invitations []*invitation
 }
 
 func New(cfg Config, store *Store, settings *prudp.Settings) *Backend {
 	b := &Backend{Cfg: cfg, Store: store, nextCID: 1, sessions: map[uint32]*prudp.Conn{},
 		gatherings: map[uint32]*gathering{},
-		methods:    map[uint16]map[uint32]Method{}, names: map[uint16]map[uint32]string{}}
+		methods:    map[uint16]map[uint32]Method{}, names: map[uint16]map[uint32]string{},
+		quiet: map[uint32]bool{}}
 	b.Auth = &prudp.Server{Name: "auth", Settings: settings, Handler: &authHandler{b}}
 	b.Secure = &prudp.Server{Name: "secure", Settings: settings, Handler: &secureHandler{b}}
 	b.registerTicketGranting()
@@ -90,6 +95,7 @@ func New(cfg Config, store *Store, settings *prudp.Settings) *Backend {
 	b.registerAccountManagement()
 	b.registerFriends()
 	b.registerMatchMaking()
+	b.registerNATTraversal()
 	return b
 }
 
@@ -102,31 +108,58 @@ func (b *Backend) register(proto uint16, method uint32, name string, f Method) {
 	b.names[proto][method] = name
 }
 
-func (b *Backend) dispatch(server string, c *prudp.Conn, raw []byte, allowed func(uint16) bool) {
+// registerQuiet registers a method the game polls continuously.
+func (b *Backend) registerQuiet(proto uint16, method uint32, name string, f Method) {
+	b.register(proto, method, name, f)
+	b.quiet[uint32(proto)<<16|method] = true
+}
+
+func (c *Ctx) who() string {
+	if c.Conn.User != "" {
+		return c.Conn.User
+	}
+	return c.Conn.Addr.String()
+}
+
+// request sends a server-initiated RMC call to a client. Call it with the
+// owning prudp.Server's lock held (i.e. from a handler or via Server.Do).
+func (b *Backend) request(c *prudp.Conn, proto uint16, method uint32, body []byte) {
+	id, _ := c.Data["next_call"].(uint32)
+	id++
+	c.Data["next_call"] = id
+	c.Send(rmc.Request(proto, id|0x40000000, method, body))
+}
+
+func (b *Backend) dispatch(server string, c *prudp.Conn, raw []byte, allowed func(proto uint16, method uint32) bool) {
 	m, err := rmc.Parse(raw)
 	if err != nil {
 		log.Printf("[%s] %s: bad RMC (%v): %x", server, c.Addr, err, raw)
 		return
 	}
+	verbose := b.Secure.Settings.Verbose
 	if !m.Request {
-		log.Printf("[%s] %s: RMC response to call %d (%s ok=%v err=%08x) body=%x", server, c.Addr, m.CallID, protoName(m.Proto), m.OK, m.Error, m.Body)
+		if !m.OK || verbose {
+			log.Printf("[%s] %s: RMC response to call %d (%s ok=%v err=%08x) body=%x", server, c.Addr, m.CallID, protoName(m.Proto), m.OK, m.Error, m.Body)
+		}
 		return
 	}
 	name := b.names[m.Proto][m.Method]
 	if name == "" {
 		name = fmt.Sprintf("method%d", m.Method)
 	}
-	f := b.methods[m.Proto][m.Method]
-	if f == nil || !allowed(m.Proto) {
-		log.Printf("[%s] %s: UNIMPLEMENTED %s.%s (call %d) body=%x", server, c.Addr, protoName(m.Proto), name, m.CallID, m.Body)
-		c.Send(rmc.ErrorResponse(m.Proto, m.CallID, rmc.ErrCoreNotImplemented))
-		return
-	}
 	who := c.User
 	if who == "" {
 		who = c.Addr.String()
 	}
-	log.Printf("[%s] %s: %s.%s (call %d)", server, who, protoName(m.Proto), name, m.CallID)
+	f := b.methods[m.Proto][m.Method]
+	if f == nil || !allowed(m.Proto, m.Method) {
+		log.Printf("[%s] %s: UNIMPLEMENTED %s.%s (call %d) body=%x", server, who, protoName(m.Proto), name, m.CallID, m.Body)
+		c.Send(rmc.ErrorResponse(m.Proto, m.CallID, rmc.ErrCoreNotImplemented))
+		return
+	}
+	if verbose || !b.quiet[uint32(m.Proto)<<16|m.Method] {
+		log.Printf("[%s] %s: %s.%s (call %d)", server, who, protoName(m.Proto), name, m.CallID)
+	}
 	ctx := &Ctx{B: b, Conn: c, Msg: m, R: rmc.NewReader(m.Body)}
 	w, code := f(ctx)
 	if code == 0 && ctx.R.Err() != nil {
@@ -217,7 +250,7 @@ func (h *authHandler) OnConnect(c *prudp.Conn, payload []byte) ([]byte, error) {
 }
 
 func (h *authHandler) OnMessage(c *prudp.Conn, msg []byte) {
-	h.b.dispatch("auth", c, msg, func(p uint16) bool { return p == ProtoTicketGranting })
+	h.b.dispatch("auth", c, msg, func(p uint16, _ uint32) bool { return p == ProtoTicketGranting })
 }
 
 func (h *authHandler) OnDisconnect(c *prudp.Conn) {}
@@ -279,7 +312,11 @@ func (h *secureHandler) OnMessage(c *prudp.Conn, msg []byte) {
 		log.Printf("[secure] %s: message before authentication: %x", c.Addr, msg)
 		return
 	}
-	h.b.dispatch("secure", c, msg, func(p uint16) bool { return p != ProtoTicketGranting })
+	// The game looks players up by name (GetPID/GetName) on the secure
+	// connection; logging in there is not allowed.
+	h.b.dispatch("secure", c, msg, func(p uint16, m uint32) bool {
+		return p != ProtoTicketGranting || m == 4 || m == 5
+	})
 }
 
 func (h *secureHandler) OnDisconnect(c *prudp.Conn) {
@@ -291,6 +328,7 @@ func (h *secureHandler) OnDisconnect(c *prudp.Conn) {
 	h.b.mu.Unlock()
 	if current {
 		h.b.dropPlayer(c)
+		h.b.dropInvitations(c.PID)
 	}
 	if c.User != "" {
 		log.Printf("[secure] %s (%s) logged out", c.User, c.Addr)

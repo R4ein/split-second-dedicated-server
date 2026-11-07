@@ -11,11 +11,14 @@ in one JSON file.
 |---|---|
 | Login, in-game account creation ("Account does not exist. Create?") | Works with the real game |
 | Secure connection, station URL registration | Works |
-| Creating a private lobby (host side) | Works: lobby opens, waits for players |
+| Creating lobbies, finding other players' lobbies | Works with two players |
+| Invites by name (lobby INVITE slot), online status | Implemented, not yet tested in game |
+| Joining a lobby: public addresses + NAT hole-punch relay | Implemented, not yet tested in game |
 | Friends list | Stub: always empty |
-| Joining another player's lobby, Quick Match, invites | Implemented server-side, **not yet tested with two players** |
-| Peer-to-peer race connection across the internet (NAT traversal) | Not implemented yet |
 | Leaderboards / rankings / Competition / RV custom protocols | Not implemented (calls are logged) |
+
+The game polls the friends list and pending invites continuously; those calls are
+only logged with `SS_VERBOSE=true`.
 
 ## Deploy with Docker Compose
 

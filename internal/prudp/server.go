@@ -110,6 +110,7 @@ type Conn struct {
 	pending       map[uint16]*pending
 	lastSeen      time.Time
 	codecOverride *Codec
+	connectAck    []byte
 
 	// Application state, owned by the Handler.
 	PID        uint32
@@ -206,6 +207,11 @@ func (s *Server) handle(from *net.UDPAddr, data []byte) {
 		if p.Flags&FlagAck != 0 {
 			return
 		}
+		if c.connected && p.ConnSig == c.clientSig && c.connectAck != nil {
+			// Retransmitted CONNECT (our ack was lost or slow): resend it.
+			s.udp.WriteToUDP(c.connectAck, c.Addr)
+			return
+		}
 		c.clientSig = p.ConnSig
 		c.session = p.Session
 		var reply []byte
@@ -238,7 +244,7 @@ func (s *Server) handle(from *net.UDPAddr, data []byte) {
 			payload = codec.Encode(reply)
 		}
 		c.connected = true
-		c.write(&Packet{Src: c.local, Dst: c.remote, Type: TypeConnect, Flags: FlagAck | c.sizeFlag(), Session: c.session,
+		c.connectAck = c.write(&Packet{Src: c.local, Dst: c.remote, Type: TypeConnect, Flags: FlagAck | c.sizeFlag(), Session: c.session,
 			Signature: c.clientSig, Seq: p.Seq, ConnSig: c.serverSig, Payload: payload})
 		s.logf("%s connected (client sig %08x, server sig %08x)", from, c.clientSig, c.serverSig)
 

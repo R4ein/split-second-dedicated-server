@@ -1,7 +1,6 @@
 package backend
 
 import (
-	"fmt"
 	"log"
 
 	"github.com/R4ein/split-second-dedicated-server/internal/rmc"
@@ -131,7 +130,7 @@ func (b *Backend) registerSecureConnection() {
 	})
 	b.register(ProtoSecureConnection, 3, "RequestURLs", func(c *Ctx) (*rmc.Writer, uint32) {
 		cid, pid := c.R.U32(), c.R.U32()
-		urls := b.urlsOf(pid)
+		urls := b.urlsFor(pid, c.Conn)
 		log.Printf("[secure]   RequestURLs cid=%d pid=%d -> %v", cid, pid, urls)
 		w := &rmc.Writer{}
 		w.Bool(len(urls) > 0)
@@ -145,8 +144,8 @@ func (b *Backend) registerSecureConnection() {
 	})
 	b.register(ProtoSecureConnection, 6, "UpdateURLs", func(c *Ctx) (*rmc.Writer, uint32) {
 		urls := c.R.StringList()
-		log.Printf("[secure]   UpdateURLs %v", urls)
-		c.Conn.Data["urls"] = b.publicizeURLs(c, urls)
+		log.Printf("[secure]   %s UpdateURLs %v", c.who(), urls)
+		c.Conn.Data["urls"] = urls
 		return nil, 0
 	})
 	b.register(ProtoSecureConnection, 8, "SendReport", func(c *Ctx) (*rmc.Writer, uint32) {
@@ -160,9 +159,9 @@ func (b *Backend) registerSecureConnection() {
 func (b *Backend) registerURLs(c *Ctx, urls []string) (*rmc.Writer, uint32) {
 	cid := b.newCID()
 	c.Conn.CID = cid
-	pub := fmt.Sprintf("prudp:/address=%s;port=%d;type=3", c.Conn.Addr.IP, c.Conn.Addr.Port)
-	log.Printf("[secure]   %s registered URLs %v; public %s", c.Conn.User, urls, pub)
-	c.Conn.Data["urls"] = b.publicizeURLs(c, urls)
+	pub := publicURL(c.Conn)
+	log.Printf("[secure]   %s registered URLs %v; public %s", c.who(), urls, pub)
+	c.Conn.Data["urls"] = urls
 	b.mu.Lock()
 	b.sessions[c.Conn.PID] = c.Conn
 	b.mu.Unlock()
@@ -171,24 +170,6 @@ func (b *Backend) registerURLs(c *Ctx, urls []string) (*rmc.Writer, uint32) {
 	w.U32(cid)
 	w.String(pub)
 	return w, 0
-}
-
-// publicizeURLs keeps the client's own station URLs and adds its address
-// as seen by the server, so peers behind NAT can be reached.
-func (b *Backend) publicizeURLs(c *Ctx, urls []string) []string {
-	out := append([]string(nil), urls...)
-	return out
-}
-
-func (b *Backend) urlsOf(pid uint32) []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if s, ok := b.sessions[pid]; ok {
-		if u, ok := s.Data["urls"].([]string); ok {
-			return u
-		}
-	}
-	return nil
 }
 
 // ---- AccountManagement (25) ----
@@ -251,6 +232,22 @@ func (b *Backend) registerAccountManagement() {
 	b.register(ProtoAccountManagement, 6, "GetName", func(c *Ctx) (*rmc.Writer, uint32) {
 		w := &rmc.Writer{}
 		w.String(b.nameOf(c.R.U32()))
+		return w, 0
+	})
+	// The game treats a player as reachable when the status string contains
+	// "Online" (checked before sending an invite).
+	b.register(ProtoAccountManagement, 18, "GetStatus", func(c *Ctx) (*rmc.Writer, uint32) {
+		pid := c.R.U32()
+		b.mu.Lock()
+		_, online := b.sessions[pid]
+		b.mu.Unlock()
+		status := "Offline"
+		if online {
+			status = "Online"
+		}
+		log.Printf("[secure]   %s asked status of %q (pid %d): %s", c.who(), b.nameOf(pid), pid, status)
+		w := &rmc.Writer{}
+		w.String(status)
 		return w, 0
 	})
 }

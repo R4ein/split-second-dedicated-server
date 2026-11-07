@@ -149,6 +149,7 @@ func likeToRegexp(p string) (*regexp.Regexp, error) {
 func (b *Backend) registerMatchMaking() {
 	reg := func(id uint32, name string, f Method) { b.register(ProtoMatchMaking, id, name, f) }
 	logBody := func(c *Ctx) { log.Printf("[secure]   body=%x", c.Msg.Body) }
+	b.registerInvitations()
 
 	reg(1, "RegisterGathering", func(c *Ctx) (*rmc.Writer, uint32) {
 		typ, data := readAnyData(c.R)
@@ -243,17 +244,28 @@ func (b *Backend) registerMatchMaking() {
 		b.mu.Unlock()
 		return w, 0
 	})
+	// URLs of everyone else in the gathering, host first, so a joining
+	// player connects to the session host rather than to itself.
 	reg(16, "GetParticipantsURLs", func(c *Ctx) (*rmc.Writer, uint32) {
-		g := b.gatheringByID(c.R.U32())
+		id := c.R.U32()
+		g := b.gatheringByID(id)
 		var urls []string
 		if g != nil {
 			b.mu.Lock()
-			parts := append([]uint32(nil), g.Participants...)
+			parts := []uint32{g.Owner}
+			for _, p := range g.Participants {
+				if p != g.Owner {
+					parts = append(parts, p)
+				}
+			}
 			b.mu.Unlock()
 			for _, p := range parts {
-				urls = append(urls, b.urlsOf(p)...)
+				if p != c.Conn.PID {
+					urls = append(urls, b.urlsFor(p, c.Conn)...)
+				}
 			}
 		}
+		log.Printf("[secure]   %s asked URLs of gathering %d: %v", c.who(), id, urls)
 		w := &rmc.Writer{}
 		w.StringList(urls)
 		return w, 0
@@ -427,6 +439,7 @@ func (b *Backend) deleteGathering(pid, id uint32) bool {
 		return false
 	}
 	delete(b.gatherings, id)
+	b.removeInvitations(func(inv *invitation) bool { return inv.gid == id })
 	log.Printf("[secure]   gathering %d removed", id)
 	return true
 }
@@ -438,6 +451,7 @@ func (b *Backend) dropPlayer(c *prudp.Conn) {
 	for id, g := range b.gatherings {
 		if g.Owner == c.PID {
 			delete(b.gatherings, id)
+			b.removeInvitations(func(inv *invitation) bool { return inv.gid == id })
 			log.Printf("[secure]   gathering %d removed (owner left)", id)
 			continue
 		}
