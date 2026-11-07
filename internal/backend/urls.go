@@ -10,8 +10,12 @@ import (
 )
 
 // Station URLs look like "prudp:/address=192.168.0.16;port=9103;sid=15".
-// The game registers only its LAN addresses, so the server adds the public
-// address it sees each player connect from. Peers try the URLs in order.
+// The game registers the addresses of all its network adapters (home LAN,
+// virtual LANs such as Radmin/ZeroTier/Tailscale, Docker bridges...), so the
+// server adds the public address it sees each player connect from and
+// orders the list for each peer. The game only connects directly (its
+// routing mode is compiled out), trying URLs in order with a timeout each,
+// so unreachable entries are dropped rather than just ranked low.
 
 func urlParams(u string) map[string]string {
 	out := map[string]string{}
@@ -41,13 +45,58 @@ func sameNetwork(a, b *prudp.Conn) bool {
 	return a != nil && b != nil && a.Addr.IP.Equal(b.Addr.IP)
 }
 
-// stationURLs returns the URLs other players should use to reach target.
-// Players behind the same public IP (same LAN) get the LAN URLs first, since
-// many routers cannot loop traffic back to their own public address.
+// Address ranges of common virtual-LAN tools. Two players with addresses in
+// the same range can reach each other directly through that tool.
+var overlayNets = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range []string{
+		"26.0.0.0/8",    // Radmin VPN
+		"25.0.0.0/8",    // LogMeIn Hamachi
+		"100.64.0.0/10", // Tailscale (and carrier-grade NAT)
+	} {
+		_, n, _ := net.ParseCIDR(c)
+		out = append(out, n)
+	}
+	return out
+}()
+
+func urlIP(u string) net.IP { return net.ParseIP(urlParams(u)["address"]).To4() }
+
+// netRank says how likely a LAN address of the target is reachable from a
+// requester with the given local addresses: 2 = same virtual LAN, 1 = same
+// /24 private subnet, 0 = not shared, -1 = useless (link-local, or an
+// address the requester itself has).
+func netRank(ip net.IP, mine []net.IP) int {
+	if ip == nil || ip.IsLinkLocalUnicast() || ip.IsLoopback() || ip.IsUnspecified() {
+		return -1
+	}
+	rank := 0
+	for _, m := range mine {
+		if m.Equal(ip) {
+			return -1
+		}
+		for _, n := range overlayNets {
+			if n.Contains(ip) && n.Contains(m) {
+				rank = 2
+			}
+		}
+		if rank < 1 && ip[0] == m[0] && ip[1] == m[1] && ip[2] == m[2] {
+			rank = 1
+		}
+	}
+	return rank
+}
+
+// stationURLs returns the URLs requester should use to reach target:
+//
+//  1. addresses on a virtual LAN both players are on
+//  2. same public IP (same household, or the same VPN exit): shared-subnet
+//     LAN addresses, then public addresses, then the other LAN addresses
+//  3. different public IPs: public addresses (NAT mapping, then public IP
+//     with the game port for forwarded routers), then shared-subnet LAN
+//     addresses; other LAN addresses are unreachable and dropped
 func stationURLs(target, requester *prudp.Conn) []string {
 	pub := []string{publicURL(target)}
-	// The public IP with the game's local port helps players who forwarded
-	// that port on their router.
 	for _, u := range registeredURLs(target) {
 		if p := urlParams(u)["port"]; p != "" && p != strconv.Itoa(target.Addr.Port) {
 			alt := fmt.Sprintf("prudp:/address=%s;port=%s;sid=15;type=3", target.Addr.IP, p)
@@ -56,11 +105,33 @@ func stationURLs(target, requester *prudp.Conn) []string {
 			}
 		}
 	}
-	lan := registeredURLs(target)
-	if sameNetwork(target, requester) {
-		return append(append([]string(nil), lan...), pub...)
+	var mine []net.IP
+	if requester != nil {
+		for _, u := range registeredURLs(requester) {
+			if ip := urlIP(u); ip != nil {
+				mine = append(mine, ip)
+			}
+		}
 	}
-	return append(pub, lan...)
+	var overlay, shared, other []string
+	for _, u := range registeredURLs(target) {
+		switch netRank(urlIP(u), mine) {
+		case 2:
+			overlay = append(overlay, u)
+		case 1:
+			shared = append(shared, u)
+		case 0:
+			other = append(other, u)
+		}
+	}
+	out := append([]string(nil), overlay...)
+	if sameNetwork(target, requester) {
+		out = append(out, shared...)
+		out = append(out, pub...)
+		return append(out, other...)
+	}
+	out = append(out, pub...)
+	return append(out, shared...)
 }
 
 func contains(l []string, s string) bool {

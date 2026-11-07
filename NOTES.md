@@ -83,8 +83,9 @@ registers one pointer per return value with `0x5B4860`, and sends via `0x5CE170`
 INVITE slot in a lobby: `TicketGranting.GetPID(name)` **on the secure connection** →
 `AccountManagement.GetStatus(pid)`; the game only invites if the string contains `"Online"`
 (`0xA25CC0`) → `MatchMaking.Invite`. The invitee polls `GetInvitationsReceived` and answers
-with `AcceptInvitation`/`DeclineInvitation`. Invitation layout assumed `{u32 gid, u32 guest,
-String msg}` (its DDL code is COMDAT-folded, unverified).
+with `FindBySingleID(gid)` + `AcceptInvitation`/`DeclineInvitation`. Invitation layout
+`{u32 gid, u32 guest, String msg}` (confirmed in game: the invitee resolves the gid).
+Before inviting, the game also sends `Friends` method 1 `(pid, u32 0, String "")`.
 
 ## Lobbies and joining
 
@@ -100,6 +101,24 @@ name, min 2 / max 8) + 40 bytes of game fields (first u32 varies 1/2, likely mod
 The game registers only LAN station URLs (`prudp:/address=192.168.x.x;port=9103;sid=15`).
 The server adds each player's public NAT mapping (source of the secure connection) and
 public IP + game port; LAN URLs go first only for players behind the same public IP.
+
+## How the game connects to peers (decrypted `JobConnectEndPoint`)
+
+- The NetZ `ConnectionManager` (`0x5C5900`) gets two flags: direct (`+0xC4`) and routing
+  (`+0xC5`). For game stations they come from the global mode `[0xD77674]`
+  (0 = direct only, 1 = routing only, 2 = both), which is 0 and never written. The RV
+  backend connection is created with direct=1, routing=0. **Routing via a server is
+  unavailable**; peers must reach each other directly.
+- Per URL (`TestCurrentURL`, `0x5D7E70`): if NAT traversal is enabled (`[0xD77A20]`, 0 here)
+  and the URL has `RVCID` → NAT traversal; else if `type` bit 1 is clear → plain direct
+  resolve; if `type` has bits 1 and 2 (e.g. `type=3`) → `PrepareNATTraversal` first.
+- URL keys used by the client (heap strings): `stream`, `sid`, `PID`, `CID`, `type`,
+  `XLSPID`, `RVCID`.
+- Accepting an invitation does not call `Participate`; `AcceptInvitation` must add the
+  player to the gathering.
+- Players on a VPN appear with the VPN exit address; two players on the same exit share one
+  public IP and cannot reach each other. A shared virtual LAN (Radmin/ZeroTier/Tailscale)
+  works because the game registers every adapter's address.
 
 ## Not yet seen / to do
 

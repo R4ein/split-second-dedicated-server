@@ -12,9 +12,9 @@ in one JSON file.
 | Login, in-game account creation ("Account does not exist. Create?") | Works with the real game |
 | Secure connection, station URL registration | Works |
 | Creating lobbies, finding other players' lobbies | Works with two players |
-| Invites by name (lobby INVITE slot), online status | Implemented, not yet tested in game |
-| Joining a lobby: public addresses + NAT hole-punch relay | Implemented, not yet tested in game |
-| Friends list | Stub: always empty |
+| Invites by name (lobby INVITE slot), online status | Works: invite arrives and is accepted |
+| Joining a lobby / starting a race between two PCs | Depends on the players' networks, see below |
+| Friends list | Stub: always empty, add-friend calls succeed |
 | Leaderboards / rankings / Competition / RV custom protocols | Not implemented (calls are logged) |
 
 The game polls the friends list and pending invites continuously; those calls are
@@ -85,9 +85,37 @@ Use the VM's public IP. Then start the game, choose **Online**, type a new
 username and password, and confirm **Create** when it says the account does
 not exist. Use a password you don't use anywhere else.
 
-The game uses UDP port 9103 on each PC for player-to-player traffic. Until
-NAT traversal is implemented, the player hosting a lobby will probably need
-to forward UDP 9103 on their router for races (untested).
+## How players connect to each other (read this if joining fails)
+
+The server only introduces players. The race itself runs **directly between
+the players' PCs** over UDP port 9103; this build of the game has no way to
+relay race traffic through a server. When a player joins a lobby, the server
+hands their game a list of addresses for the other players, and the game
+tries them one by one:
+
+1. an address on a virtual LAN both players are on (Radmin VPN, Hamachi,
+   Tailscale, ZeroTier, ...)
+2. the other player's public address, with NAT hole punching arranged by
+   the server
+3. the other player's home-LAN address (only if both share a public IP)
+
+What that means in practice:
+
+- **No VPN, normal home routers:** should work through hole punching. If a
+  router is strict, forward UDP 9103 to the PC of the player who hosts.
+- **VPN / proxy / anti-censorship tool:** the server sees the VPN's address,
+  not the player's. Two players behind VPNs (especially the same VPN
+  provider or exit) **cannot reach each other**. Either exclude
+  `SplitSecond.exe` from the VPN (split tunnelling), or use the virtual-LAN
+  option below.
+- **Virtual LAN (works around VPNs and strict routers):** all players join
+  the same Radmin VPN / ZeroTier / Tailscale network and keep the hosts-file
+  line pointing at the VM. The game reports its virtual-LAN address
+  automatically and the server puts it first, so no other setup is needed.
+  Make sure Windows Firewall allows `SplitSecond.exe` on that network.
+
+Each address the game cannot reach costs it a timeout, so a join can take a
+while before it succeeds or fails.
 
 ## Without Docker
 

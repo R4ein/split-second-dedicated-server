@@ -32,6 +32,15 @@ func writeInvitations(l []*invitation) *rmc.Writer {
 	return w
 }
 
+func containsPID(l []uint32, pid uint32) bool {
+	for _, p := range l {
+		if p == pid {
+			return true
+		}
+	}
+	return false
+}
+
 // removeInvitations drops invitations matching pred. Call with b.mu held.
 func (b *Backend) removeInvitations(pred func(*invitation) bool) int {
 	kept := b.invitations[:0]
@@ -104,12 +113,26 @@ func (b *Backend) registerInvitations() {
 			b.mu.Lock()
 			defer b.mu.Unlock()
 			n := b.removeInvitations(func(inv *invitation) bool { return inv.gid == gid && inv.guest == c.Conn.PID })
-			verb := "declined"
-			if accept {
-				verb = "accepted"
+			g := b.gatherings[gid]
+			if !accept {
+				log.Printf("[secure]   %s declined the invitation to gathering %d", c.who(), gid)
+				return boolResp(n > 0), 0
 			}
-			log.Printf("[secure]   %s %s the invitation to gathering %d", c.who(), verb, gid)
-			return boolResp(n > 0 && b.gatherings[gid] != nil), 0
+			if n == 0 || g == nil {
+				log.Printf("[secure]   %s accepted a missing/expired invitation to gathering %d", c.who(), gid)
+				return boolResp(false), 0
+			}
+			// The game does not call Participate after accepting: accepting
+			// makes the player a participant (as in Quazal's own server).
+			if !containsPID(g.Participants, c.Conn.PID) {
+				if max := g.maxParticipants(); max > 0 && len(g.Participants) >= max {
+					log.Printf("[secure]   %s accepted the invitation but gathering %d is full", c.who(), gid)
+					return boolResp(false), 0
+				}
+				g.Participants = append(g.Participants, c.Conn.PID)
+			}
+			log.Printf("[secure]   %s accepted the invitation and joined gathering %d (%d players)", c.who(), gid, len(g.Participants))
+			return boolResp(true), 0
 		}
 	}
 	reg(6, "AcceptInvitation", answer(true))

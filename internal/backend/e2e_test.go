@@ -276,8 +276,21 @@ func TestInviteJoinAndNAT(t *testing.T) {
 	if n := rmc.NewReader(guest.call(ProtoMatchMaking, 10, nil).Body).U32(); n != 0 {
 		t.Fatal("invitation not removed after accepting")
 	}
-	if !rmc.NewReader(guest.call(ProtoMatchMaking, 11, w.Bytes()).Body).Bool() {
-		t.Fatal("Participate failed")
+	// Like the real game, the guest does not call Participate after
+	// accepting: accepting must have made it a participant.
+	w = &rmc.Writer{}
+	w.U32(gid)
+	if parts := rmc.NewReader(guest.call(ProtoMatchMaking, 13, w.Bytes()).Body).U32List(); !containsPID(parts, guestPID) {
+		t.Fatalf("guest not a participant after accepting: %v", parts)
+	}
+
+	// Friends.AddFriend (sent by the game when inviting) succeeds.
+	w = &rmc.Writer{}
+	w.U32(guestPID)
+	w.U32(0)
+	w.String("")
+	if !rmc.NewReader(host.call(ProtoFriends, 1, w.Bytes()).Body).Bool() {
+		t.Fatal("AddFriend failed")
 	}
 
 	// Same public IP (127.0.0.1) for both, so LAN URLs come first; the
