@@ -1,0 +1,29 @@
+# Split/Second community server: one service (auth + secure servers in one
+# process). Copy .env.example to .env and set SS_PUBLIC_IP first.
+name: split-second
+
+services:
+  ssserver:
+    build: .
+    image: split-second-dedicated-server:latest
+    restart: unless-stopped
+    environment:
+      # IP or hostname players reach this machine at. It is sent to the game
+      # as the secure-server address, so it must be the public one.
+      SS_PUBLIC_IP: ${SS_PUBLIC_IP:?set SS_PUBLIC_IP in .env}
+      SS_VERBOSE: ${SS_VERBOSE:-false}
+    ports:
+      # The game always uses 31120; the secure port is advertised to the game
+      # by number, so host and container ports must stay identical.
+      - "31120:31120/udp"
+      - "31121:31121/udp"
+    volumes:
+      - ssserver-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ssserver-data:

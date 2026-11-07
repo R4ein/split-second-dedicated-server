@@ -1,0 +1,13 @@
+# build output
+*.exe
+/dist/
+/ssserver
+
+# local server state and logs
+/data/
+/logs/
+.env
+
+# reverse-engineering output: may contain the game's code; never commit
+/re/
+*.bin

@@ -1,0 +1,6 @@
+# Send only what the image build needs.
+*
+!go.mod
+!cmd
+!internal
+**/*_test.go
