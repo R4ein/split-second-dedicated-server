@@ -23,6 +23,11 @@ import (
 //	12 u16 minParticipants   14 u16 maxParticipants
 //	16 u32 participationPolicy   20 u32 policyArgument
 //	24 u32 flags   28 u32 state   32 String description
+//
+// The server owns idMyself, pidOwner and pidHost: the game registers and
+// updates gatherings with zeros there. Joiners read pidHost and ask
+// SecureConnection.RequestURLs for that player's stations, so a zero host
+// makes every join fail ("lobby no longer exists").
 const gatheringHeaderLen = 32
 
 type gathering struct {
@@ -30,6 +35,7 @@ type gathering struct {
 	Type         string
 	Data         []byte
 	Owner        uint32
+	Host         uint32
 	Description  string
 	Participants []uint32
 	SessionURL   string
@@ -40,6 +46,13 @@ func (g *gathering) setU32(off int, v uint32) {
 	if len(g.Data) >= off+4 {
 		binary.LittleEndian.PutUint32(g.Data[off:], v)
 	}
+}
+
+// stamp writes the server-owned header fields into the stored data.
+func (g *gathering) stamp() {
+	g.setU32(0, g.ID)
+	g.setU32(4, g.Owner)
+	g.setU32(8, g.Host)
 }
 
 func (g *gathering) u32(off int) uint32 {
@@ -159,10 +172,8 @@ func (b *Backend) registerMatchMaking() {
 		}
 		b.mu.Lock()
 		b.nextGID++
-		g := &gathering{ID: b.nextGID, Type: typ, Data: data, Owner: c.Conn.PID, Description: parseDescription(data)}
-		g.setU32(0, g.ID)
-		g.setU32(4, c.Conn.PID)
-		g.setU32(8, c.Conn.PID)
+		g := &gathering{ID: b.nextGID, Type: typ, Data: data, Owner: c.Conn.PID, Host: c.Conn.PID, Description: parseDescription(data)}
+		g.stamp()
 		b.gatherings[g.ID] = g
 		b.mu.Unlock()
 		log.Printf("[secure]   %s registered gathering %d (%s %q, max %d) data=%x", c.Conn.User, g.ID, typ, g.Description, g.maxParticipants(), data)
@@ -194,9 +205,15 @@ func (b *Backend) registerMatchMaking() {
 			log.Printf("[secure]   update of unknown/foreign gathering %d", id)
 			return boolResp(false), 0
 		}
+		// A non-zero host who is in the lobby is a host change; zero (what
+		// the game normally sends) keeps the current host.
+		if h := binary.LittleEndian.Uint32(data[8:]); h != 0 && h != g.Host && (h == g.Owner || containsPID(g.Participants, h)) {
+			log.Printf("[secure]   gathering %d host -> %q (pid %d)", id, b.nameOf(h), h)
+			g.Host = h
+		}
 		g.Type, g.Data, g.Description = typ, data, parseDescription(data)
-		g.setU32(4, g.Owner)
-		log.Printf("[secure]   gathering %d updated (%q) data=%x", id, g.Description, data)
+		g.stamp()
+		log.Printf("[secure]   gathering %d updated (%q) data=%x", id, g.Description, g.Data)
 		return boolResp(true), 0
 	})
 	reg(11, "Participate", func(c *Ctx) (*rmc.Writer, uint32) {
@@ -228,7 +245,7 @@ func (b *Backend) registerMatchMaking() {
 		if g == nil {
 			return boolResp(false), 0
 		}
-		g.Participants = removePID(g.Participants, c.Conn.PID)
+		g.leave(c.Conn.PID)
 		log.Printf("[secure]   %s left gathering %d", c.Conn.User, id)
 		return boolResp(true), 0
 	})
@@ -463,7 +480,16 @@ func (b *Backend) dropPlayer(c *prudp.Conn) {
 			log.Printf("[secure]   gathering %d removed (owner left)", id)
 			continue
 		}
-		g.Participants = removePID(g.Participants, c.PID)
+		g.leave(c.PID)
+	}
+}
+
+// leave removes a participant; a departing host hands back to the owner.
+func (g *gathering) leave(pid uint32) {
+	g.Participants = removePID(g.Participants, pid)
+	if g.Host == pid && pid != g.Owner {
+		g.Host = g.Owner
+		g.stamp()
 	}
 }
 

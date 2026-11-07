@@ -358,3 +358,106 @@ func TestInviteJoinAndNAT(t *testing.T) {
 	}
 	_ = hostPID
 }
+
+// The game registers and updates its lobby with zeros in the owner and host
+// fields. Joiners read the host PID from the gathering and call
+// SecureConnection.RequestURLs(0, host); with host 0 they get nothing and
+// report "lobby no longer exists". The server must keep the host.
+func TestJoinFindsHostAfterUpdate(t *testing.T) {
+	s := startServer(t)
+	host, hostPID := s.login(t, "Host", "pw1", "prudp:/address=192.168.0.16;port=9103;sid=15")
+	guest, guestPID := s.login(t, "Visitor", "pw2", "prudp:/address=192.168.0.189;port=9103;sid=15")
+
+	body, _ := hex.DecodeString("0f0041545647616d6553657373696f6e005a0000005600000000000000000000000000000002000800010000000000000000000000000000000c00537065656472756e6e657200020000000000000000000000000000000000000000000000010000000000000000000000efbeadde")
+	gid := rmc.NewReader(host.call(ProtoMatchMaking, 1, body).Body).U32()
+	const dataOff = 2 + 15 + 4 + 4 // String type, outer length, inner length
+	upd := append([]byte(nil), body...)
+	binary.LittleEndian.PutUint32(upd[dataOff:], gid) // as the game sends it: owner and host 0
+	if !rmc.NewReader(host.call(ProtoMatchMaking, 4, upd).Body).Bool() {
+		t.Fatal("UpdateGathering by the owner failed")
+	}
+
+	hostOf := func(r *rmc.Reader) uint32 {
+		_, data := readAnyData(r)
+		if r.Err() != nil || len(data) < gatheringHeaderLen {
+			t.Fatalf("bad gathering: %v", r.Err())
+		}
+		if binary.LittleEndian.Uint32(data) != gid || binary.LittleEndian.Uint32(data[4:]) != hostPID {
+			t.Fatalf("bad gathering header %x", data[:12])
+		}
+		return binary.LittleEndian.Uint32(data[8:])
+	}
+	// Public lobby list.
+	w := &rmc.Writer{}
+	w.String("ATVGameSession")
+	w.U32(0)
+	w.U32(20)
+	r := rmc.NewReader(guest.call(ProtoMatchMaking, 17, w.Bytes()).Body)
+	if n := r.U32(); n != 1 {
+		t.Fatalf("FindByType returned %d gatherings", n)
+	}
+	if h := hostOf(r); h != hostPID {
+		t.Fatalf("FindByType: host pid %d, want %d", h, hostPID)
+	}
+	// Invitation path.
+	w = &rmc.Writer{}
+	w.U32(gid)
+	r = rmc.NewReader(guest.call(ProtoMatchMaking, 21, w.Bytes()).Body)
+	if !r.Bool() {
+		t.Fatal("FindBySingleID: not found")
+	}
+	if h := hostOf(r); h != hostPID {
+		t.Fatalf("FindBySingleID: host pid %d, want %d", h, hostPID)
+	}
+
+	// Join, then ask for the host's stations as the game does.
+	w = &rmc.Writer{}
+	w.U32(gid)
+	w.String("")
+	if !rmc.NewReader(guest.call(ProtoMatchMaking, 11, w.Bytes()).Body).Bool() {
+		t.Fatal("Participate failed")
+	}
+	w = &rmc.Writer{}
+	w.U32(0)
+	w.U32(hostPID)
+	r = rmc.NewReader(guest.call(ProtoSecureConnection, 3, w.Bytes()).Body)
+	ok, urls := r.Bool(), r.StringList()
+	if !ok || len(urls) == 0 || r.Err() != nil {
+		t.Fatalf("RequestURLs(host) = %v %v", ok, urls)
+	}
+	for _, u := range urls {
+		if !strings.Contains(u+";", fmt.Sprintf(";PID=%d;", hostPID)) {
+			t.Fatalf("RequestURLs returned a non-host URL: %v", urls)
+		}
+	}
+
+	// The joiner's own update attempt (seen after failed joins) is refused
+	// and leaves the lobby intact.
+	upd2 := append([]byte(nil), upd...)
+	binary.LittleEndian.PutUint32(upd2[dataOff+8:], guestPID)
+	if rmc.NewReader(guest.call(ProtoMatchMaking, 4, upd2).Body).Bool() {
+		t.Fatal("non-owner UpdateGathering accepted")
+	}
+	w = &rmc.Writer{}
+	w.U32(gid)
+	r = rmc.NewReader(guest.call(ProtoMatchMaking, 21, w.Bytes()).Body)
+	if !r.Bool() || hostOf(r) != hostPID {
+		t.Fatal("lobby host changed by a non-owner")
+	}
+
+	// The owner may hand hosting to a participant; it returns to the owner
+	// when that player leaves.
+	if !rmc.NewReader(host.call(ProtoMatchMaking, 4, upd2).Body).Bool() {
+		t.Fatal("owner UpdateGathering failed")
+	}
+	if g := s.b.gatheringByID(gid); g.Host != guestPID || g.u32(8) != guestPID {
+		t.Fatalf("host after hand-over = %d/%d, want %d", g.Host, g.u32(8), guestPID)
+	}
+	w = &rmc.Writer{}
+	w.U32(gid)
+	w.String("")
+	guest.call(ProtoMatchMaking, 12, w.Bytes())
+	if g := s.b.gatheringByID(gid); g.Host != hostPID || g.u32(8) != hostPID {
+		t.Fatalf("host after the new host left = %d/%d, want %d", g.Host, g.u32(8), hostPID)
+	}
+}

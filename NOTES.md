@@ -92,8 +92,17 @@ Before inviting, the game also sends `Friends` method 1 `(pid, u32 0, String "")
 Host: `UpdateGathering(id 0)` (fails, harmless) → `RegisterGathering(ATVGameSession)` →
 `Participate(gid)` → `LaunchSession(gid, "")` (empty URL) → `UpdateGathering(gid)`.
 
-Joiner: `FindByType("ATVGameSession")` → `Participate(gid)` → `GetParticipantsURLs(gid)` →
+Joiner: `FindByType("ATVGameSession")` (or `FindBySingleID` + `AcceptInvitation` for an invite)
+→ `Participate(gid)` → `GetParticipantsURLs(gid)` → `NATTraversal.RequestProbeInitiation`
+(only when it has stations to probe) → **`SecureConnection.RequestURLs(cid 0, pidHost)`** →
 peer-to-peer NetZ connection to the host (not visible to the server).
+
+`pidHost` comes from the gathering header. The game registers **and updates** gatherings
+with 0 in `idMyself`, `pidOwner` and `pidHost`, so the server must keep its own values on
+`UpdateGathering`. When it returned the client's 0, every joiner called `RequestURLs(0, 0)`,
+got nothing, and showed "Lobby no longer exists" within a second. A failed joiner then
+sends `UpdateGathering` for the host's gathering (refused, not the owner) and quick match
+falls back to creating its own lobby.
 
 `ATVGameSession` = Gathering header (32 bytes + String description, description = host
 name, min 2 / max 8) + 40 bytes of game fields (first u32 varies 1/2, likely mode).

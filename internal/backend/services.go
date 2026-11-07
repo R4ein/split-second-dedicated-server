@@ -128,10 +128,16 @@ func (b *Backend) registerSecureConnection() {
 		log.Printf("[secure]   RegisterEx extra data: %x", c.R.Rest())
 		return b.registerURLs(c, urls)
 	})
+	// The game calls this with the lobby host's PID (the gathering's
+	// pidHost) right after GetParticipantsURLs, and abandons the join if it
+	// gets nothing back.
 	b.register(ProtoSecureConnection, 3, "RequestURLs", func(c *Ctx) (*rmc.Writer, uint32) {
 		cid, pid := c.R.U32(), c.R.U32()
+		if pid == 0 && cid != 0 {
+			pid = b.pidForCID(cid)
+		}
 		urls := b.urlsFor(pid, c.Conn)
-		log.Printf("[secure]   RequestURLs cid=%d pid=%d -> %v", cid, pid, urls)
+		log.Printf("[secure]   %s RequestURLs cid=%d pid=%d (%q) -> %v", c.who(), cid, pid, b.nameOf(pid), urls)
 		w := &rmc.Writer{}
 		w.Bool(len(urls) > 0)
 		w.StringList(urls)
@@ -154,6 +160,18 @@ func (b *Backend) registerSecureConnection() {
 		log.Printf("[secure]   SendReport id=%d data=%x", id, data)
 		return nil, 0
 	})
+}
+
+// pidForCID finds the logged-in player with the given connection ID.
+func (b *Backend) pidForCID(cid uint32) uint32 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for pid, s := range b.sessions {
+		if s.CID == cid {
+			return pid
+		}
+	}
+	return 0
 }
 
 func (b *Backend) registerURLs(c *Ctx, urls []string) (*rmc.Writer, uint32) {
