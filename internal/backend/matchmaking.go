@@ -35,7 +35,6 @@ type gathering struct {
 	Type         string
 	Data         []byte
 	Owner        uint32
-	Host         uint32
 	Description  string
 	Participants []uint32
 	SessionURL   string
@@ -48,11 +47,13 @@ func (g *gathering) setU32(off int, v uint32) {
 	}
 }
 
-// stamp writes the server-owned header fields into the stored data.
+// stamp writes the server-owned header fields into the stored data,
+// overwriting whatever the client sent (the game sends zeros). The owner is
+// always the host: joiners read pidHost and call RequestURLs with it.
 func (g *gathering) stamp() {
 	g.setU32(0, g.ID)
 	g.setU32(4, g.Owner)
-	g.setU32(8, g.Host)
+	g.setU32(8, g.Owner)
 }
 
 func (g *gathering) u32(off int) uint32 {
@@ -106,7 +107,12 @@ func (rr resultRange) apply(gs []*gathering) []*gathering {
 	return gs
 }
 
-func writeGatherings(gs []*gathering) *rmc.Writer {
+// writeGatherings serializes gatherings under the backend lock: handlers on
+// other goroutines (e.g. a timeout's dropPlayer) mutate gathering data, so
+// unlocked reads of it would race.
+func (b *Backend) writeGatherings(gs []*gathering) *rmc.Writer {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	w := &rmc.Writer{}
 	w.U32(uint32(len(gs)))
 	for _, g := range gs {
@@ -172,7 +178,7 @@ func (b *Backend) registerMatchMaking() {
 		}
 		b.mu.Lock()
 		b.nextGID++
-		g := &gathering{ID: b.nextGID, Type: typ, Data: data, Owner: c.Conn.PID, Host: c.Conn.PID, Description: parseDescription(data)}
+		g := &gathering{ID: b.nextGID, Type: typ, Data: data, Owner: c.Conn.PID, Description: parseDescription(data)}
 		g.stamp()
 		b.gatherings[g.ID] = g
 		b.mu.Unlock()
@@ -204,12 +210,6 @@ func (b *Backend) registerMatchMaking() {
 		if g == nil || g.Owner != c.Conn.PID {
 			log.Printf("[secure]   update of unknown/foreign gathering %d", id)
 			return boolResp(false), 0
-		}
-		// A non-zero host who is in the lobby is a host change; zero (what
-		// the game normally sends) keeps the current host.
-		if h := binary.LittleEndian.Uint32(data[8:]); h != 0 && h != g.Host && (h == g.Owner || containsPID(g.Participants, h)) {
-			log.Printf("[secure]   gathering %d host -> %q (pid %d)", id, b.nameOf(h), h)
-			g.Host = h
 		}
 		g.Type, g.Data, g.Description = typ, data, parseDescription(data)
 		g.stamp()
@@ -245,7 +245,7 @@ func (b *Backend) registerMatchMaking() {
 		if g == nil {
 			return boolResp(false), 0
 		}
-		g.leave(c.Conn.PID)
+		g.Participants = removePID(g.Participants, c.Conn.PID)
 		log.Printf("[secure]   %s left gathering %d", c.Conn.User, id)
 		return boolResp(true), 0
 	})
@@ -297,30 +297,30 @@ func (b *Backend) registerMatchMaking() {
 	})
 	reg(17, "FindByType", func(c *Ctx) (*rmc.Writer, uint32) {
 		typ, rr := c.R.String(), readRange(c.R)
-		return writeGatherings(rr.apply(b.find(func(g *gathering) bool { return g.Type == typ }))), 0
+		return b.writeGatherings(rr.apply(b.find(func(g *gathering) bool { return g.Type == typ }))), 0
 	})
 	reg(18, "FindByDescription", func(c *Ctx) (*rmc.Writer, uint32) {
 		d, rr := c.R.String(), readRange(c.R)
 		log.Printf("[secure]   FindByDescription %q", d)
-		return writeGatherings(rr.apply(b.find(func(g *gathering) bool { return g.Description == d }))), 0
+		return b.writeGatherings(rr.apply(b.find(func(g *gathering) bool { return g.Description == d }))), 0
 	})
 	reg(19, "FindByDescriptionRegex", func(c *Ctx) (*rmc.Writer, uint32) {
 		d, rr := c.R.String(), readRange(c.R)
 		re, err := regexp.Compile(d)
 		log.Printf("[secure]   FindByDescriptionRegex %q", d)
 		if err != nil {
-			return writeGatherings(nil), 0
+			return b.writeGatherings(nil), 0
 		}
-		return writeGatherings(rr.apply(b.find(func(g *gathering) bool { return re.MatchString(g.Description) }))), 0
+		return b.writeGatherings(rr.apply(b.find(func(g *gathering) bool { return re.MatchString(g.Description) }))), 0
 	})
 	reg(37, "FindByDescriptionLike", func(c *Ctx) (*rmc.Writer, uint32) {
 		d, rr := c.R.String(), readRange(c.R)
 		re, err := likeToRegexp(d)
 		log.Printf("[secure]   FindByDescriptionLike %q", d)
 		if err != nil {
-			return writeGatherings(nil), 0
+			return b.writeGatherings(nil), 0
 		}
-		return writeGatherings(rr.apply(b.find(func(g *gathering) bool { return re.MatchString(g.Description) }))), 0
+		return b.writeGatherings(rr.apply(b.find(func(g *gathering) bool { return re.MatchString(g.Description) }))), 0
 	})
 	reg(20, "FindByID", func(c *Ctx) (*rmc.Writer, uint32) {
 		ids := c.R.U32List()
@@ -328,10 +328,13 @@ func (b *Backend) registerMatchMaking() {
 		for _, id := range ids {
 			want[id] = true
 		}
-		return writeGatherings(b.find(func(g *gathering) bool { return want[g.ID] })), 0
+		return b.writeGatherings(b.find(func(g *gathering) bool { return want[g.ID] })), 0
 	})
 	reg(21, "FindBySingleID", func(c *Ctx) (*rmc.Writer, uint32) {
-		g := b.gatheringByID(c.R.U32())
+		id := c.R.U32()
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		g := b.gatherings[id]
 		w := &rmc.Writer{}
 		w.Bool(g != nil)
 		if g != nil {
@@ -345,11 +348,11 @@ func (b *Backend) registerMatchMaking() {
 	})
 	reg(22, "FindByOwner", func(c *Ctx) (*rmc.Writer, uint32) {
 		pid, rr := c.R.U32(), readRange(c.R)
-		return writeGatherings(rr.apply(b.find(func(g *gathering) bool { return g.Owner == pid }))), 0
+		return b.writeGatherings(rr.apply(b.find(func(g *gathering) bool { return g.Owner == pid }))), 0
 	})
 	reg(23, "FindByParticipants", func(c *Ctx) (*rmc.Writer, uint32) {
 		pids := c.R.U32List()
-		return writeGatherings(b.find(func(g *gathering) bool {
+		return b.writeGatherings(b.find(func(g *gathering) bool {
 			for _, p := range pids {
 				for _, q := range g.Participants {
 					if p == q {
@@ -369,7 +372,10 @@ func (b *Backend) registerMatchMaking() {
 		return boolResp(b.setSessionURL(c, id, url)), 0
 	})
 	reg(28, "GetSessionURL", func(c *Ctx) (*rmc.Writer, uint32) {
-		g := b.gatheringByID(c.R.U32())
+		id := c.R.U32()
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		g := b.gatherings[id]
 		w := &rmc.Writer{}
 		if g == nil || g.SessionURL == "" {
 			w.Bool(false)
@@ -381,7 +387,10 @@ func (b *Backend) registerMatchMaking() {
 		return w, 0
 	})
 	reg(41, "GetSessionURLs", func(c *Ctx) (*rmc.Writer, uint32) {
-		g := b.gatheringByID(c.R.U32())
+		id := c.R.U32()
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		g := b.gatherings[id]
 		var urls []string
 		if g != nil {
 			if g.SessionURL != "" {
@@ -394,7 +403,10 @@ func (b *Backend) registerMatchMaking() {
 		return w, 0
 	})
 	reg(29, "GetState", func(c *Ctx) (*rmc.Writer, uint32) {
-		g := b.gatheringByID(c.R.U32())
+		id := c.R.U32()
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		g := b.gatherings[id]
 		w := &rmc.Writer{}
 		w.Bool(g != nil)
 		if g != nil {
@@ -480,16 +492,7 @@ func (b *Backend) dropPlayer(c *prudp.Conn) {
 			log.Printf("[secure]   gathering %d removed (owner left)", id)
 			continue
 		}
-		g.leave(c.PID)
-	}
-}
-
-// leave removes a participant; a departing host hands back to the owner.
-func (g *gathering) leave(pid uint32) {
-	g.Participants = removePID(g.Participants, pid)
-	if g.Host == pid && pid != g.Owner {
-		g.Host = g.Owner
-		g.stamp()
+		g.Participants = removePID(g.Participants, c.PID)
 	}
 }
 

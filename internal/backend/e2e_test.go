@@ -445,19 +445,33 @@ func TestJoinFindsHostAfterUpdate(t *testing.T) {
 		t.Fatal("lobby host changed by a non-owner")
 	}
 
-	// The owner may hand hosting to a participant; it returns to the owner
-	// when that player leaves.
+	// The header fields are server-owned: even the owner cannot change the
+	// host. The update succeeds, but the host pid stays the owner's.
 	if !rmc.NewReader(host.call(ProtoMatchMaking, 4, upd2).Body).Bool() {
 		t.Fatal("owner UpdateGathering failed")
 	}
-	if g := s.b.gatheringByID(gid); g.Host != guestPID || g.u32(8) != guestPID {
-		t.Fatalf("host after hand-over = %d/%d, want %d", g.Host, g.u32(8), guestPID)
-	}
 	w = &rmc.Writer{}
 	w.U32(gid)
-	w.String("")
-	guest.call(ProtoMatchMaking, 12, w.Bytes())
-	if g := s.b.gatheringByID(gid); g.Host != hostPID || g.u32(8) != hostPID {
-		t.Fatalf("host after the new host left = %d/%d, want %d", g.Host, g.u32(8), hostPID)
+	r = rmc.NewReader(guest.call(ProtoMatchMaking, 21, w.Bytes()).Body)
+	if !r.Bool() || hostOf(r) != hostPID {
+		t.Fatal("owner update changed the stamped host pid")
+	}
+
+	// What a joiner sees after that update: its probe list (the URLs before
+	// its own entry) is non-empty and all of the host's.
+	w = &rmc.Writer{}
+	w.U32(gid)
+	all := rmc.NewReader(guest.call(ProtoMatchMaking, 16, w.Bytes()).Body).StringList()
+	probe, err := gameProbeList(all, guestPID)
+	if err != nil {
+		t.Fatalf("%v: %v", err, all)
+	}
+	if len(probe) == 0 {
+		t.Fatalf("empty probe list: %v", all)
+	}
+	for _, u := range probe {
+		if !strings.Contains(u+";", fmt.Sprintf(";PID=%d;", hostPID)) {
+			t.Fatalf("probe list has a non-host URL: %v", probe)
+		}
 	}
 }
