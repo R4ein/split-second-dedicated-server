@@ -136,6 +136,28 @@ public IP + game port; LAN URLs go first only for players behind the same public
   public IP and cannot reach each other. A shared virtual LAN (Radmin/ZeroTier/Tailscale)
   works because the game registers every adapter's address.
 
+## AI racers in online races
+
+Races run peer to peer, so the server has no part in them. The game itself supports AI
+in networked races: split-screen uses the same NetZ event code.
+
+- `cATVNetEventSlotManager::Host_PopulateSlots` (`0x87B1A0`, called from the host's
+  room-state machine at `0x88119E`): if the GameSetup DO's AI flag is 1 (`0x871AD0`, low
+  nibble of byte `+0x58`; `[0xD91E4C]` = GameSetup handle), the session master fills
+  every free slot up to 8 with AI player DOs. AI updaters are spread across peers
+  (`HostMigrateAIUpdatersLoadBalanced`) and migrate when a player leaves.
+- The host copies the AI flag into GameSetup from global `[0xD377D4]` (`0x871C30`; high
+  nibble from `[0xD377D8]`).
+- Event select in the lobby (`0x486FF0`, decrypted code) sets that global:
+  game type `[0xD6EE78]` 6 = public lobby → AI off; 7 = private lobby → AI on for event
+  modes 0 (Race) and 3 (Survival), off otherwise. Mode names table at `0xD36A68`:
+  Race, Elimination, Time Trial, Survival, Air Strike, Air Revenge, Other.
+- The private-lobby host's **Game Options** pop-up (`FE_popup`, `[0xD0F474]` = 1) has rows
+  Change Vehicle / Change Event / Reset Scores / `TEXT_AI_DIFFICULTY` (On/Off, only for
+  modes 0 and 3); leaving the row writes the flag (`0x8719F0`).
+- Public-lobby AI would need a runtime patch on the host (e.g. skip the type-6 branch at
+  `0x4871F4`); that code is SecuROM-encrypted on disk.
+
 ## Not yet seen / to do
 
 - Whether races start between two networks (NAT traversal relay is implemented, untested).
