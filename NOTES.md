@@ -58,9 +58,30 @@ hex initial hash, groups=32, email="qwerty@keyboard.com")` → logout → normal
 
 ## After login
 
-- `Friends` (proto 20) method 10 `(u8 relationship=2, bool reversed=1)` → one list. Polled
-  ~2×/s for the whole online session whether it succeeds or not; answer with an empty list.
+- `Friends` (proto 20) method 10 `GetDetailedList(u8 relationship, bool reversed)` →
+  List<FriendData>. Polled ~2×/s with (1, false) = friends and (2, true) = incoming
+  requests. FriendData (client reader `0xB042D0`):
+  `u32 pid, String name, u8 relationship, u32 details, String status`.
+  Other methods: 1 `AddFriend(pid, details, msg)`, 3 `AcceptFriendship(pid)`,
+  5 `BlackList(pid, details)`, 7 `ClearRelationship(pid)`, each → bool.
 - `MatchMaking.GetInvitationsReceived` (10, no args) is polled ~1×/s in the online menus.
+
+## Custom RV services (client setup at 0x9FD710)
+
+Protocol IDs passed to the base client at `0x5EF850`: Competition 15 (0x9FD892),
+**RVLeaderboard 101** (0x9FD911), RVPlayer 102 (0x9FD987), RVValidation 111 (0x9FD9BE).
+Only the leaderboard stubs exist (0x9FE060/0x9FE1E0/0x9FE370 = methods 1/2/3):
+
+- `1 SubmitStats(bool, List<StatEntry>)` → nothing
+- `2 QueryStatsByRange(List<{u32 board, u32 offset, u32 count, bool order, u32 arg}>)`
+  → List<cRVLeaderboardStats>
+- `3 QueryStatsByPIDs(List<{u32 board, List<u32> pids}>)` → List<cRVLeaderboardStats>
+
+StatEntry/cRVLeaderboardStats share one wire shape (writer `0xA04D30`, reader `0xA04E70`):
+`u32, u32, f64, f64, List<Property>`; Property (`0xA04FC0`) =
+`u32 id, String name, u32 flags, 6×f64`. On submit the first u32 is the leaderboard id.
+In query rows the server sends (pid, rank) there — **unverified against the real game**,
+as is the meaning of the query's `order` bool (server: false = highest first).
 
 ## Client RPC stubs (decrypted image)
 

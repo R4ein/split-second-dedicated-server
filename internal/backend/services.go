@@ -256,13 +256,7 @@ func (b *Backend) registerAccountManagement() {
 	// "Online" (checked before sending an invite).
 	b.register(ProtoAccountManagement, 18, "GetStatus", func(c *Ctx) (*rmc.Writer, uint32) {
 		pid := c.R.U32()
-		b.mu.Lock()
-		_, online := b.sessions[pid]
-		b.mu.Unlock()
-		status := "Offline"
-		if online {
-			status = "Online"
-		}
+		status := b.statusOf(pid)
 		log.Printf("[secure]   %s asked status of %q (pid %d): %s", c.who(), b.nameOf(pid), pid, status)
 		w := &rmc.Writer{}
 		w.String(status)

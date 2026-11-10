@@ -24,6 +24,13 @@ const (
 	ProtoMatchMaking        uint16 = 21
 	ProtoMessaging          uint16 = 23
 	ProtoAccountManagement  uint16 = 25
+
+	// Split/Second's custom Rendez-Vous services (protocol IDs from the
+	// client constructors at 0x9FD8E9..0x9FD9C8 in the game executable).
+	ProtoCompetition   uint16 = 15
+	ProtoRVLeaderboard uint16 = 101
+	ProtoRVPlayer      uint16 = 102
+	ProtoRVValidation  uint16 = 111
 )
 
 var protoNames = map[uint16]string{
@@ -81,6 +88,9 @@ type Backend struct {
 
 	nextInvite  uint64
 	invitations []*invitation
+
+	social social     // friend relationships (friends.json)
+	stats  statsStore // leaderboard stats (stats.json)
 }
 
 func New(cfg Config, store *Store, settings *prudp.Settings) *Backend {
@@ -90,12 +100,15 @@ func New(cfg Config, store *Store, settings *prudp.Settings) *Backend {
 		quiet: map[uint32]bool{}}
 	b.Auth = &prudp.Server{Name: "auth", Settings: settings, Handler: &authHandler{b}}
 	b.Secure = &prudp.Server{Name: "secure", Settings: settings, Handler: &secureHandler{b}}
+	b.social.open(store.Dir())
+	b.stats.open(store.Dir())
 	b.registerTicketGranting()
 	b.registerSecureConnection()
 	b.registerAccountManagement()
 	b.registerFriends()
 	b.registerMatchMaking()
 	b.registerNATTraversal()
+	b.registerRVLeaderboard()
 	return b
 }
 

@@ -117,6 +117,9 @@ func (s *Store) save() error {
 	return nil
 }
 
+// Dir is the data directory the store lives in.
+func (s *Store) Dir() string { return filepath.Dir(s.path) }
+
 // ServerKey is the secret the secure server uses to read its own tickets.
 func (s *Store) ServerKey() []byte {
 	s.mu.Lock()

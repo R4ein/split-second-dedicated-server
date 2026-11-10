@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 )
 
 // Message is one RMC request or response.
@@ -139,6 +140,9 @@ func (w *Writer) I32(v int32)  { binary.Write(w, binary.LittleEndian, v) }
 func (w *Writer) F32(v float32) {
 	binary.Write(w, binary.LittleEndian, v)
 }
+func (w *Writer) F64(v float64) {
+	binary.Write(w, binary.LittleEndian, v)
+}
 func (w *Writer) Bool(v bool) {
 	if v {
 		w.U8(1)
@@ -218,6 +222,9 @@ func (r *Reader) U16() uint16 { return binary.LittleEndian.Uint16(r.take(2)) }
 func (r *Reader) U32() uint32 { return binary.LittleEndian.Uint32(r.take(4)) }
 func (r *Reader) U64() uint64 { return binary.LittleEndian.Uint64(r.take(8)) }
 func (r *Reader) Bool() bool  { return r.U8() != 0 }
+func (r *Reader) F64() float64 {
+	return math.Float64frombits(r.U64())
+}
 
 func (r *Reader) String() string {
 	n := int(r.U16())

@@ -14,11 +14,18 @@ in one JSON file.
 | Creating lobbies, finding other players' lobbies | Works with two players |
 | Invites by name (lobby INVITE slot), online status | Works: invite arrives and is accepted |
 | Joining a lobby / starting a race between two PCs | Depends on the players' networks, see below |
-| Friends list | Stub: always empty, add-friend calls succeed |
-| Leaderboards / rankings / Competition / RV custom protocols | Not implemented (calls are logged) |
+| Friends list (requests, accept, blacklist, online status) | Implemented, stored in `friends.json` |
+| Player statistics / leaderboards / rankings | Implemented, stored in `stats.json`; row order untested against the real game |
+| Competition / RVPlayer / RVValidation protocols | Not implemented (never seen called; calls are logged) |
 
 The game polls the friends list and pending invites continuously; those calls are
 only logged with `SS_VERBOSE=true`.
+
+Friend requests come from the in-game friends screen (and inviting someone to a
+lobby also sends one). The other player accepts from their friends screen.
+Leaderboard rows are built from the stats each game submits after races; the
+server ranks players per leaderboard and answers the game's range and
+by-player queries.
 
 ## Deploy with Docker Compose
 
@@ -40,8 +47,9 @@ dials 31120, and the server tells the game which secure port to use.
 `docker compose ps` shows the container as `healthy` once the server answers
 a PRUDP handshake on 31120.
 
-Accounts live in the named volume `split-second_ssserver-data` and survive
-rebuilds. To update after pulling new code: `git pull && docker compose up -d --build`.
+Accounts, friend lists and leaderboard stats live in the named volume
+`split-second_ssserver-data` (`accounts.json`, `friends.json`, `stats.json`)
+and survive rebuilds. To update after pulling new code: `git pull && docker compose up -d --build`.
 
 ### Account administration
 

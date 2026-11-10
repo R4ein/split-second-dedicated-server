@@ -475,3 +475,258 @@ func TestJoinFindsHostAfterUpdate(t *testing.T) {
 		}
 	}
 }
+
+// readFriendRows parses a GetDetailedList response.
+type friendRow struct {
+	pid     uint32
+	name    string
+	rel     uint8
+	details uint32
+	status  string
+}
+
+func readFriendRows(t *testing.T, m *rmc.Message) []friendRow {
+	t.Helper()
+	r := rmc.NewReader(m.Body)
+	n := int(r.U32())
+	rows := make([]friendRow, 0, n)
+	for i := 0; i < n; i++ {
+		rows = append(rows, friendRow{r.U32(), r.String(), r.U8(), r.U32(), r.String()})
+	}
+	if !m.OK || r.Err() != nil || r.Remaining() != 0 {
+		t.Fatalf("bad friend list: %+v (err %v, %d left)", m, r.Err(), r.Remaining())
+	}
+	return rows
+}
+
+func (f *fakeClient) friendList(t *testing.T, rel uint8, reversed bool) []friendRow {
+	t.Helper()
+	w := &rmc.Writer{}
+	w.U8(rel)
+	w.Bool(reversed)
+	return readFriendRows(t, f.call(ProtoFriends, 10, w.Bytes()))
+}
+
+// Friend request, incoming list, accept, mutual list, clear.
+func TestFriendsList(t *testing.T) {
+	s := startServer(t)
+	a, pidA := s.login(t, "Anna", "pw1", "prudp:/address=192.168.0.2;port=9103;sid=15")
+	c, pidC := s.login(t, "Chris", "pw2", "prudp:/address=192.168.0.3;port=9103;sid=15")
+
+	if rows := a.friendList(t, relFriend, false); len(rows) != 0 {
+		t.Fatalf("fresh friends list not empty: %v", rows)
+	}
+
+	// Anna asks Chris: Anna sees an outgoing request, Chris an incoming one.
+	w := &rmc.Writer{}
+	w.U32(pidC)
+	w.U32(7)
+	w.String("race?")
+	if !rmc.NewReader(a.call(ProtoFriends, 1, w.Bytes()).Body).Bool() {
+		t.Fatal("AddFriend failed")
+	}
+	out := a.friendList(t, relPending, false)
+	in := c.friendList(t, relPending, true)
+	if len(out) != 1 || out[0].pid != pidC || out[0].name != "Chris" {
+		t.Fatalf("outgoing request list %v", out)
+	}
+	if len(in) != 1 || in[0] != (friendRow{pidA, "Anna", relPending, 7, "Online"}) {
+		t.Fatalf("incoming request list %v", in)
+	}
+	if rows := a.friendList(t, relFriend, false); len(rows) != 0 {
+		t.Fatalf("not friends yet: %v", rows)
+	}
+
+	// Chris accepts: both see each other as online friends.
+	w = &rmc.Writer{}
+	w.U32(pidA)
+	if !rmc.NewReader(c.call(ProtoFriends, 3, w.Bytes()).Body).Bool() {
+		t.Fatal("AcceptFriendship failed")
+	}
+	fa := a.friendList(t, relFriend, false)
+	fc := c.friendList(t, relFriend, false)
+	if len(fa) != 1 || fa[0].pid != pidC || fa[0].rel != relFriend || fa[0].status != "Online" {
+		t.Fatalf("Anna's friends %v", fa)
+	}
+	if len(fc) != 1 || fc[0].pid != pidA || fc[0].name != "Anna" {
+		t.Fatalf("Chris's friends %v", fc)
+	}
+	if rows := c.friendList(t, relPending, true); len(rows) != 0 {
+		t.Fatalf("request still pending after accept: %v", rows)
+	}
+
+	// Clearing removes the friendship for both.
+	w = &rmc.Writer{}
+	w.U32(pidC)
+	if !rmc.NewReader(a.call(ProtoFriends, 7, w.Bytes()).Body).Bool() {
+		t.Fatal("ClearRelationship failed")
+	}
+	if rows := c.friendList(t, relFriend, false); len(rows) != 0 {
+		t.Fatalf("friendship not cleared: %v", rows)
+	}
+
+	// Mutual requests become a friendship without an accept.
+	w = &rmc.Writer{}
+	w.U32(pidC)
+	w.U32(0)
+	w.String("")
+	a.call(ProtoFriends, 1, w.Bytes())
+	w = &rmc.Writer{}
+	w.U32(pidA)
+	w.U32(0)
+	w.String("")
+	if !rmc.NewReader(c.call(ProtoFriends, 1, w.Bytes()).Body).Bool() {
+		t.Fatal("mutual AddFriend failed")
+	}
+	if rows := a.friendList(t, relFriend, false); len(rows) != 1 || rows[0].pid != pidC {
+		t.Fatalf("mutual add did not create friendship: %v", rows)
+	}
+}
+
+type statRow struct {
+	pid, rank uint32
+	c, d      float64
+	props     []statProp
+}
+
+func readStatRows(t *testing.T, m *rmc.Message) []statRow {
+	t.Helper()
+	r := rmc.NewReader(m.Body)
+	n := int(r.U32())
+	rows := make([]statRow, 0, n)
+	for i := 0; i < n; i++ {
+		row := statRow{pid: r.U32(), rank: r.U32(), c: r.F64(), d: r.F64()}
+		for j, np := 0, int(r.U32()); j < np; j++ {
+			p := statProp{ID: r.U32(), Name: r.String(), Flags: r.U32()}
+			for k := range p.V {
+				p.V[k] = r.F64()
+			}
+			row.props = append(row.props, p)
+		}
+		rows = append(rows, row)
+	}
+	if !m.OK || r.Err() != nil || r.Remaining() != 0 {
+		t.Fatalf("bad stats response: %+v (err %v, %d left)", m, r.Err(), r.Remaining())
+	}
+	return rows
+}
+
+func submitStats(t *testing.T, f *fakeClient, board uint32, c, d float64, props ...statProp) {
+	t.Helper()
+	w := &rmc.Writer{}
+	w.Bool(true) // final
+	w.U32(1)     // one entry
+	w.U32(board)
+	w.U32(0) // aux
+	w.F64(c)
+	w.F64(d)
+	w.U32(uint32(len(props)))
+	for _, p := range props {
+		w.U32(p.ID)
+		w.String(p.Name)
+		w.U32(p.Flags)
+		for _, v := range p.V {
+			w.F64(v)
+		}
+	}
+	if m := f.call(ProtoRVLeaderboard, 1, w.Bytes()); !m.OK || len(m.Body) != 0 {
+		t.Fatalf("SubmitStats: %+v", m)
+	}
+}
+
+// Submit stats from two players, read them back ranked by range and by pid.
+func TestLeaderboards(t *testing.T) {
+	s := startServer(t)
+	a, pidA := s.login(t, "Anna", "pw1", "prudp:/address=192.168.0.2;port=9103;sid=15")
+	c, pidC := s.login(t, "Chris", "pw2", "prudp:/address=192.168.0.3;port=9103;sid=15")
+
+	submitStats(t, a, 5, 100, 1, statProp{ID: 2, Name: "Score", V: [6]float64{100}})
+	submitStats(t, c, 5, 200, 1)
+	submitStats(t, a, 6, 50, 0) // another board
+
+	// Range query, order=false -> highest C first.
+	w := &rmc.Writer{}
+	w.U32(1) // one query
+	w.U32(5) // board
+	w.U32(0) // offset
+	w.U32(10)
+	w.Bool(false) // order
+	w.U32(0)      // arg
+	rows := readStatRows(t, a.call(ProtoRVLeaderboard, 2, w.Bytes()))
+	if len(rows) != 2 || rows[0].pid != pidC || rows[0].rank != 1 || rows[0].c != 200 ||
+		rows[1].pid != pidA || rows[1].rank != 2 {
+		t.Fatalf("range rows %+v", rows)
+	}
+	if len(rows[1].props) != 1 || rows[1].props[0].Name != "Score" || rows[1].props[0].V[0] != 100 {
+		t.Fatalf("properties did not round-trip: %+v", rows[1].props)
+	}
+
+	// order=true inverts, offset/count window the result.
+	w = &rmc.Writer{}
+	w.U32(1)
+	w.U32(5)
+	w.U32(1) // offset: skip rank 1
+	w.U32(10)
+	w.Bool(true)
+	w.U32(0)
+	if rows = readStatRows(t, a.call(ProtoRVLeaderboard, 2, w.Bytes())); len(rows) != 1 || rows[0].pid != pidC || rows[0].rank != 2 {
+		t.Fatalf("ascending window rows %+v", rows)
+	}
+
+	// Query by PIDs; resubmitting replaces the entry and changes the rank.
+	byPID := func(pid uint32) statRow {
+		w := &rmc.Writer{}
+		w.U32(1)
+		w.U32(5)
+		w.U32List([]uint32{pid})
+		rows := readStatRows(t, c.call(ProtoRVLeaderboard, 3, w.Bytes()))
+		if len(rows) != 1 || rows[0].pid != pid {
+			t.Fatalf("by-pid rows %+v", rows)
+		}
+		return rows[0]
+	}
+	if row := byPID(pidA); row.rank != 2 || row.c != 100 {
+		t.Fatalf("Anna's row %+v", row)
+	}
+	submitStats(t, a, 5, 300, 1)
+	if row := byPID(pidA); row.rank != 1 || row.c != 300 {
+		t.Fatalf("Anna's row after resubmit %+v", row)
+	}
+
+	// An unknown board is empty, not an error.
+	w = &rmc.Writer{}
+	w.U32(1)
+	w.U32(99)
+	w.U32(0)
+	w.U32(10)
+	w.Bool(false)
+	w.U32(0)
+	if rows = readStatRows(t, a.call(ProtoRVLeaderboard, 2, w.Bytes())); len(rows) != 0 {
+		t.Fatalf("unknown board rows %+v", rows)
+	}
+}
+
+// Friend and stats data survives a server restart (reload from disk).
+func TestSocialAndStatsPersist(t *testing.T) {
+	s := startServer(t)
+	a, pidA := s.login(t, "Anna", "pw1", "prudp:/address=192.168.0.2;port=9103;sid=15")
+	_, pidC := s.login(t, "Chris", "pw2", "prudp:/address=192.168.0.3;port=9103;sid=15")
+
+	w := &rmc.Writer{}
+	w.U32(pidC)
+	w.U32(0)
+	w.String("")
+	a.call(ProtoFriends, 1, w.Bytes())
+	submitStats(t, a, 5, 100, 1)
+
+	var soc social
+	soc.open(s.b.Store.Dir())
+	if len(soc.Relations) != 1 || soc.Relations[0].From != pidA || soc.Relations[0].To != pidC {
+		t.Fatalf("friends.json did not persist: %+v", soc.Relations)
+	}
+	var st statsStore
+	st.open(s.b.Store.Dir())
+	if e := st.Boards[5][pidA]; e == nil || e.C != 100 {
+		t.Fatalf("stats.json did not persist: %+v", st.Boards)
+	}
+}
